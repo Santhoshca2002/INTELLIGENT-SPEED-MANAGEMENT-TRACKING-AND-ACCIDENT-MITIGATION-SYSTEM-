@@ -1,0 +1,61 @@
+#include <TinyGPS.h>
+#include <SoftwareSerial.h>
+
+SoftwareSerial Gsm(6, 7); // RX, TX pins for GSM module
+char phone_no[] = "+91xxxxxxxxxx"; // Replace with your phone number
+TinyGPS gps;
+
+void setup() {
+  Serial.begin(9600); // Serial monitor
+  Gsm.begin(9600); // GSM module
+  pinMode(10, INPUT); // Input pin for the button
+}
+
+void loop() {
+  bool newData = false;
+  unsigned long chars;
+  unsigned short sentences, failed;
+
+  // Read GPS data
+  for (unsigned long start = millis(); millis() - start < 1000;) {
+    while (Serial.available()) {
+      char c = Serial.read();
+      if (gps.encode(c))
+        newData = true;
+    }
+  }
+
+  // Check for incoming SMS
+  if (Gsm.available() > 0) {
+    String textMessage = Gsm.readString();
+    textMessage.toUpperCase();
+    delay(10);
+  }
+
+  int state = digitalRead(10); // Read button state
+
+  if (state == LOW) {
+    float flat, flon;
+    unsigned long age;
+    gps.f_get_position(&flat, &flon, &age);
+
+    // Send SMS
+    Gsm.println("AT+CMGF=1"); // Set SMS mode to text
+    delay(500);
+    Gsm.print("AT+CMGS=\""); // Start SMS message
+    Gsm.print(phone_no); // Recipient phone number
+    Gsm.println("\"");
+    Gsm.print("Alert I need help.............\n"); // SMS content
+    Gsm.print("http://maps.google.com/maps?q=loc:");
+    Gsm.print(flat == TinyGPS::GPS_INVALID_F_ANGLE ? 0.0 : flat, 6);
+    Gsm.print(",");
+    Gsm.print(flon == TinyGPS::GPS_INVALID_F_ANGLE ? 0.0 : flon, 6);
+    delay(200);
+    Gsm.write(26); // End SMS with CTRL+Z
+    delay(200);
+    Gsm.println();
+    Serial.println("SMS Sent");
+  }
+
+  delay(1000); // Delay for 1 second before looping again
+}

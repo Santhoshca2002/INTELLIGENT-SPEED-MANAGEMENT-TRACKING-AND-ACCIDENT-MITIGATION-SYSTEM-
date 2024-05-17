@@ -1,0 +1,199 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+
+#define SIM800_TX_PIN 8
+#define SIM800_RX_PIN 9
+#define SPEED_SENSOR1_PIN A0
+#define SPEED_LIMIT 3 // Speed limit in km/h
+#define PUSH_BUTTON_PIN 5 // Pin connected to push button
+#define BUZZER_PIN 3 // Pin connected to buzzer
+#define DEVICE_PIN 4// Pin connected to the device
+#define MODULE_PIN 2
+#define ACCIDENT_DURATION 1000 // Duration in milliseconds to detect an accident
+
+SoftwareSerial sim800(SIM800_TX_PIN, SIM800_RX_PIN);
+LiquidCrystal_I2C lcd(0x27, 16, 2);                                                                                  
+
+String firstPhoneNumber = "+919150905521"; // First authorized phone number
+float lati = 9.956360; // Latitude placeholder 
+float longi = 78.068286; // Longitude placeholder
+bool accidentOccurred = false;
+bool speedLimitSMSSent = false; // Flag to track if SMS has been sent for speed limit violation
+
+void setup() {
+  pinMode(SPEED_SENSOR1_PIN, INPUT);
+  pinMode(PUSH_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(DEVICE_PIN, OUTPUT);
+  pinMode(MODULE_PIN, OUTPUT);
+  
+  digitalWrite(DEVICE_PIN, HIGH); // Turn on the device initially
+  digitalWrite(MODULE_PIN, HIGH);
+  sim800.begin(9600);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.print("    HI BUDDY     ");
+  delay(2000);
+
+  while (!sim800.available()) {
+    sim800.println("AT");
+    delay(1000);
+    Serial.println("connecting....");
+  }
+
+  Serial.println("Connected..");
+
+  sim800.println("AT+CMGF=1"); // Set SMS Text Mode
+  delay(1000);
+  sim800.println("AT+CNMI=1,2,0,0,0"); // Procedure, how to receive messages from the network
+  delay(1000);
+  sim800.println("AT+CMGL=\"REC UNREAD\""); // Read unread messages
+
+  Serial.println("Ready to receive Commands..");
+  Serial.begin(9600); // Initialize serial communication
+}
+
+void loop() {
+  int speed1 = getSpeed(SPEED_SENSOR1_PIN);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("HONDA   : " + String(speed1) + " km/h ");
+
+  // Check if speed exceeds the limit and SMS hasn't been sent already
+  if (speed1 > SPEED_LIMIT && !speedLimitSMSSent) {
+    digitalWrite(BUZZER_PIN, HIGH); // Turn on the buzzer
+    delay(1000); // Wait for 1 second
+    digitalWrite(BUZZER_PIN, LOW); // Turn off the buzzer
+    sendSMS("Speed exceeded limit", firstPhoneNumber); // Send SMS to first phone number
+    speedLimitSMSSent = true; // Set flag to indicate SMS has been sent
+  } else if (speed1 <= SPEED_LIMIT) {
+    speedLimitSMSSent = false; // Reset the flag once speed drops below the limit
+  }
+
+  // Check if push button is pressed for 3 seconds
+  if (digitalRead(PUSH_BUTTON_PIN) == LOW) {
+    unsigned long buttonPressedTime = millis();
+    while (digitalRead(PUSH_BUTTON_PIN) == LOW && millis() - buttonPressedTime <= ACCIDENT_DURATION) {
+      // Wait for the button to be released or ACCIDENT_DURATION to pass
+    }
+    if (millis() - buttonPressedTime >= ACCIDENT_DURATION) {
+      accidentOccurred = true; // Mark accident occurred
+      digitalWrite(DEVICE_PIN, LOW);// Turn off the device
+      digitalWrite(BUZZER_PIN, HIGH);
+      lcd.setCursor(0, 1);
+      lcd.print("!!!ACCIDENT!!!");
+      delay(6000); // Display "!!!ACCIDENT!!!" for 6 seconds
+      sendAccidentSMS(firstPhoneNumber); // Send accident SMS to first phone number
+    }
+  }
+
+  // Check for incoming SMS
+  if (sim800.available()) {
+    delay(100);
+    String incomingData = "";
+    while (sim800.available()) {
+      char incomingByte = sim800.read();
+      incomingData += incomingByte;
+    }
+    delay(10);
+    Serial.println("Received SMS: " + incomingData); // Debug print
+    receivedMessage(incomingData); // Process the received SMS
+    if (incomingData.indexOf("OK") == -1) {
+      sim800.println("AT+CMGDA=\"DEL ALL\"");
+      delay(1000);
+    }
+  }
+
+  // Check for serial commands
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    Serial.print("Received Command: ");
+    Serial.println(command); // Debug print
+
+    if (command.equalsIgnoreCase("HON")) {
+      digitalWrite(DEVICE_PIN, HIGH);
+      delay(1000);
+      Serial.println("Command: Device Turned On.");
+      sendSMS("Device turned ON", firstPhoneNumber); // Send SMS to first phone number
+    } else if (command.equalsIgnoreCase("HOFF")) {
+      digitalWrite(DEVICE_PIN, LOW);
+      Serial.println("Command: Device Turned Off.");
+      sendSMS("Device turned OFF", firstPhoneNumber); // Send SMS to first phone number
+    } else {
+      Serial.println("Invalid command.");
+    }
+  }
+}
+
+int getSpeed(int pin) {
+  int pulse = pulseIn(pin, HIGH);
+  float time = pulse / 1000000.0;
+  float distanceMeters = 0.008; // Specify the circumference of the rotating object in meters
+  float speed = (distanceMeters / 1000.0) / time * 3600.0;
+  return (int)speed;
+}
+
+void receivedMessage(String inputString) {
+  int index = inputString.indexOf('"') + 1;
+  inputString = inputString.substring(index);
+  index = inputString.indexOf('"');
+  String number = inputString.substring(0, index);
+  Serial.println("Number: " + number);
+
+  index = inputString.indexOf("\n") + 1;
+  String message = inputString.substring(index);
+  message.trim();
+  Serial.println("Message: " + message);
+  message.toUpperCase(); // uppercase the message received
+
+  if (accidentOccurred) {
+    // Accident occurred, send accident message and Google Maps link
+    String location = "Current Location"; // Placeholder for actual location
+    String coordinates = "https://maps.google.com/?q=" + String(lati, 6) + "," + String(longi, 6); // Google Maps link with coordinates
+    sendSMS("ACCIDENT OCCURRED\nLocation: " + location + "\nCoordinates: " + coordinates, number);
+  } else if (message.indexOf("WIMH") != -1) {
+    // Retrieve current location and coordinates
+    String location = "Paravai, Madurai"; // Placeholder location
+    String coordinates = "https://maps.google.com/?q=" + String(lati, 6) + "," + String(longi, 6); // Adjust precision to 6 decimal places for latitude and longitude
+
+    // Send SMS with location and coordinates
+    sendSMS("Location: " + location + "\nCoordinates: " + coordinates, number);
+  } else if (number == firstPhoneNumber) {
+    if (message.indexOf("HON") > -1) {
+      digitalWrite(DEVICE_PIN, HIGH);
+      delay(1000);
+      Serial.println("Command: Device Turned On.");
+      sendSMS("Device turned ON", firstPhoneNumber); // Send SMS to first phone number
+    }
+
+    if (message.indexOf("HOFF") > -1) {
+      digitalWrite(DEVICE_PIN, LOW);
+      Serial.println("Command: Device Turned Off.");
+      sendSMS("Device turned OFF", firstPhoneNumber); // Send SMS to first phone number
+    }
+  } else {
+    Serial.println("Unauthorized sender");
+  }
+}
+
+void sendSMS(const String& message, String number) {
+  sim800.println("AT+CMGF=1");
+  delay(100);
+  sim800.println("AT+CMGS=\"" + number + "\"");
+  delay(100);
+  sim800.println(message);
+  delay(100);
+  sim800.println((char)26);
+  delay(100);
+}
+
+void sendAccidentSMS(String number) {
+  String location = "Current Location"; // Placeholder for actual location
+  String coordinates = "https://maps.google.com/?q=" + String(lati, 6) + "," + String(longi, 6); // Google Maps link with coordinates
+  sendSMS("ACCIDENT OCCURRED\nLocation: " + location + "\nCoordinates: " + coordinates, number);
+  delay(3000); 
+}
